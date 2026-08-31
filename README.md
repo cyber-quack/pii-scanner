@@ -26,7 +26,7 @@ People accumulate files they forget about — old resumes, spreadsheets, exporte
 
 \- \*\*Confidence tiering\*\* — results split into DEFINITE (validated) and POSSIBLE (needs review)
 
-\- \*\*Digit-normalized filtering\*\* — search `7028604847` and find `(702) 860-4847`, `702.860.4847`, and every other formatting variant
+\- \*\*Digit-normalized filtering\*\* — search `8605197419` and find `(860) 519-7419`, `860.519.7419`, and every other formatting variant
 
 \- \*\*Interactive prompts\*\* — no CLI flags required; the tool guides you through configuration
 
@@ -92,7 +92,7 @@ You'll be prompted to:
 
 
 
-1\. Choose PII types to search (`email,phone,ssn,credit\_card`, or blank for all)
+1\. Choose PII types to search (`email,phone,ssn,credit_card`, or blank for all)
 
 2\. Optionally enter specific values to filter for (partial values OK — e.g., `@outlook.com` or an area code)
 
