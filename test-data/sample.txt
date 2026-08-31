@@ -1,0 +1,7 @@
+Contact Information:
+John Doe
+john.doe@example.com
+Phone: (555) 123-4567
+SSN: 123-45-6789
+Credit Card: 5563101629776547
+Credit Card Masked: ************6547
