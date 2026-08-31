@@ -5,10 +5,17 @@ PII Scanner - Detects commonly exposed personally identifiable information in fi
 Use Case: Security audits, data leakage prevention, compliance checking.
 WARNING: For educational and authorized testing purposes only.
 """
+# ============================================
+# Build Configuration
+# Set to False to build the Lite version
+# (no OCR code paths are ever reachable or mentioned)
+# ==========================================
+OCR_ENABLED = False
 
 import os
 import re
 import sys
+import msvcrt
 import warnings
 import email
 from pathlib import Path
@@ -51,9 +58,30 @@ def print_banner():
     print("       PII SCANNER v2.0 - Data Privacy Audit Tool")
     print("=" * 60 + "\n")
 
+def ask_yes_no(prompt):
+    """Prompt user for yes/no. Accepts y/n/yes/no, any capitalization. Returns True or False."""
+    while True:
+        answer = input(prompt).strip().lower()
+        if answer in ('y', 'yes'):
+            return True
+        elif answer in ('n', 'no'):
+            return False
+        print("  Please enter Y, N, Yes, or No.")
+        
+def check_for_cancel():
+    """Check if user pressed Q to cancel the scan. Returns True if cancelled."""
+    if msvcrt.kbhit():
+        key = msvcrt.getch().decode('ascii', errors='ignore').lower()
+        if key == 'q':
+            print("\n[!] Scan cancelled by user.")
+            return True
+    return False
+
 def get_user_preferences():
     """Interactively collect user preferences for scanning."""
-    valid_types = set(PATTERNS.keys()) | {'phone_loose'}
+    # Types the user can select (internal aliases like amex/phone_loose are auto-enabled)
+    USER_SELECTABLE_TYPES = ['email', 'phone', 'ssn', 'credit_card']
+    valid_types = set(PATTERNS.keys()) | {'phone_loose'}  # keep this for internal validation
     
     print("Welcome to PII Scanner!")
     print("-" * 60)
@@ -61,7 +89,7 @@ def get_user_preferences():
     print("  - email       : Email addresses")
     print("  - phone       : Phone numbers")
     print("  - ssn         : Social Security Numbers")
-    print("  - credit_card : Credit card numbers")
+    print("  - credit_card : Credit card numbers (Visa, MC, Discover, Amex, masked)")
     
     print("\nInstructions:")
     print("  - Type one or more types, separated by commas")
@@ -73,17 +101,17 @@ def get_user_preferences():
         pii_input = input("Enter PII types to search: ").strip().lower()
         
         if not pii_input:
-            types_to_scan = list(PATTERNS.keys())
+            types_to_scan = list(USER_SELECTABLE_TYPES)   # ← changed from list(PATTERNS.keys())
             break
         
         types_to_scan = [t.strip().replace(' ', '_') for t in pii_input.split(',')]
         types_to_scan = list(dict.fromkeys(types_to_scan))  # Remove duplicates
         
-        invalid_types = [t for t in types_to_scan if t not in valid_types]
-        
+        invalid_types = [t for t in types_to_scan if t not in USER_SELECTABLE_TYPES]
+
         if invalid_types:
             print(f"\n[!] Invalid type(s): {invalid_types}")
-            print(f"    Valid types: {', '.join(sorted(valid_types - {'phone_loose'}))}")
+            print(f"    Valid types: {', '.join(USER_SELECTABLE_TYPES)}")
             print("    Please try again.\n")
             continue
         
@@ -98,17 +126,16 @@ def get_user_preferences():
     print("  - Enter comma-separated values to filter results")
     print("  - Example: @outlook.com,555,123-45-6789")
     print("  - Leave blank to show ALL findings\n")
-    
+
     filters = {}
     for pii_type in types_to_scan:
         display_type = pii_type.replace('_', ' ')
-        
         filter_val = input(f"Specific {display_type} values (comma-sep, or empty): ").strip()
         if filter_val:
             filters[pii_type] = [v.strip() for v in filter_val.split(',')]
         else:
             filters[pii_type] = None
-    
+
     # When phone is selected, use loose pattern only (it covers both strict and non-strict)
     # Strict matches become DEFINITE, non-strict become POSSIBLE
     if 'phone' in types_to_scan:
@@ -136,12 +163,16 @@ def get_target_path():
     print("\n" + "-" * 60)
     target = input("Enter directory or file path: ").strip()
     
+    # Strip surrounding quotes (added by drag-and-drop or "Copy as path")
+    target = target.strip('"').strip("'")
+    
     # Expand ~ and handle Windows paths
     target = os.path.expanduser(target)
     
     while not os.path.exists(target):
         print(f"[!] Error: Path '{target}' does not exist.")
         target = input("Enter a valid directory or file path: ").strip()
+        target = target.strip('"').strip("'")
         target = os.path.expanduser(target)
     
     return target
@@ -201,18 +232,149 @@ def get_phone_confidence(phone_match, strict_pattern_match):
         return 'MEDIUM'
     return 'LOW'
 
-def extract_pdf_text(filepath):
-    """Extract text content from a PDF file using PyMuPDF."""
+def _extract_with_pymupdf(filepath):
+    """Primary PDF extraction via MuPDF. Returns (text, page_error_count)."""
+    import pymupdf
+    pymupdf.TOOLS.mupdf_display_errors(False)
+
+    doc = pymupdf.open(filepath)
+    text = ""
+    page_errors = 0
+    for page in doc:
+        try:
+            text += page.get_text()
+        except Exception:
+            page_errors += 1
+    doc.close()
+    return text, page_errors
+
+def _extract_with_pypdf(filepath):
+    """Different reading method, used when MuPDF can't get the text."""
+    from pypdf import PdfReader
+    reader = PdfReader(str(filepath))
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
+    return text
+
+def _classify_pdf_failure(filepath):
+    """Figure out why a PDF gave us no text.
+    Returns 'encrypted', 'image_only', or 'corrupt'."""
     try:
         import pymupdf
+        pymupdf.TOOLS.mupdf_display_errors(False)
         doc = pymupdf.open(filepath)
-        text = ""
+
+        if doc.needs_pass:
+            doc.authenticate('')
+            if doc.needs_pass:
+                doc.close()
+                return 'encrypted'
+
+        # Check whether ANY page has a text layer
+        has_text = False
         for page in doc:
-            text += page.get_text()
+            try:
+                if page.get_text().strip():
+                    has_text = True
+                    break
+            except Exception:
+                pass
         doc.close()
-        return text
-    except Exception as e:
-        return None
+
+        return 'image_only' if not has_text else 'corrupt'
+    except Exception:
+        return 'corrupt'
+
+def extract_pdf_text(filepath, damaged_pdf_choice=None):
+    """Extract PDF text. Returns (text, damaged_pdf_choice)."""
+    text, page_errors = "", 0
+    try:
+        text, page_errors = _extract_with_pymupdf(filepath)
+    except Exception:
+        pass
+
+    # Damaged but partially readable: warn and get consent FIRST
+    if page_errors:
+        # Ask once per scan; the choice applies to every damaged PDF found
+        if damaged_pdf_choice is None:
+            print(f"\n[!] A damaged PDF was found: '{filepath.name}'")
+            print("    This file has unreadable sections. The scan may miss PII on these files.")
+            print("    How should damaged PDFs be handled for the rest of this scan?")
+            print("    [1] Scan them anyway (best effort, no changes to your files)")
+            print("    [2] Use a different reading method (your original file will not be altered)")
+            print("    [3] Skip all damaged PDFs")
+
+            while True:
+                choice = input("    Your choice (1/2/3): ").strip()
+                if choice in ('1', '2', '3'):
+                    damaged_pdf_choice = choice
+                    break
+                print("    Please enter 1, 2, or 3.")
+
+        if damaged_pdf_choice == '3':
+            return None, damaged_pdf_choice
+        elif damaged_pdf_choice == '2':
+            try:
+                fallback = _extract_with_pypdf(filepath)
+                if fallback and fallback.strip():
+                    print(f"[*] Recovered text from: {filepath.name}")
+                    return fallback, damaged_pdf_choice
+            except Exception:
+                pass
+            print(f"[!] Could not read: {filepath.name}")
+            return None, damaged_pdf_choice
+        # choice '1' falls through with whatever partial text MuPDF got
+
+    if text.strip():
+        return text, damaged_pdf_choice
+        if damaged_pdf_choice == '3':
+            return None, damaged_pdf_choice
+        elif damaged_pdf_choice == '2':
+            try:
+                fallback = _extract_with_pypdf(filepath)
+                if fallback and fallback.strip():
+                    print(f"[*] Recovered text from: {filepath.name}")
+                    return fallback, damaged_pdf_choice
+            except Exception:
+                pass
+            print(f"[!] Could not read: {filepath.name}")
+            return None, damaged_pdf_choice
+        # choice '1' falls through with partial text
+
+    if text.strip():
+        return text, damaged_pdf_choice
+
+    # Nothing extracted — classify why
+    reason = _classify_pdf_failure(filepath)
+    # encrypted → skip with message
+    # image_only → the Lite message from step 2
+    # corrupt → automatic fallback attempt, then "[!] Could not extract text"
+
+    # ---- The file yielded no text. Diagnose and recover or warn. ----
+    reason = _classify_pdf_failure(filepath)  # returns 'encrypted', 'image_only', or 'corrupt'
+    
+    if reason == 'encrypted':
+        print(f"\n[!] Skipping '{filepath.name}' - it is password protected.")
+        return None, damaged_pdf_choice
+
+    if reason == 'image_only':
+        if not OCR_ENABLED:
+            print(f"\n[!] '{filepath.name}' is a scanned image with no readable text.")
+            print("    PII inside images cannot be found by this version.")
+            return None, damaged_pdf_choice
+
+    # MuPDF got nothing — try the other method automatically
+    try:
+        fallback = _extract_with_pypdf(filepath)
+        if fallback and fallback.strip():
+            print(f"[*] Recovered text from {filepath.name} using a different reading method.")
+            return fallback, damaged_pdf_choice
+    except Exception:
+        pass
+
+    print(f"[!] Could not extract text from {filepath.name}.")
+    return None, damaged_pdf_choice
 
 def extract_docx_text(filepath):
     """Extract text content from a .docx file using python-docx."""
@@ -260,7 +422,7 @@ def extract_eml_text(filepath):
     except Exception:
         return None
 
-def scan_file(filepath, filters):
+def scan_file(filepath, filters, damaged_pdf_choice=None):
     """Scan a single file for PII patterns, returning high/low confidence findings."""
     findings_high = {}
     findings_low = {}
@@ -269,21 +431,21 @@ def scan_file(filepath, filters):
         suffix = filepath.suffix.lower()
 
         if suffix == '.pdf':
-            content = extract_pdf_text(filepath)
+            content, damaged_pdf_choice = extract_pdf_text(filepath, damaged_pdf_choice)
             if not content:
-                return findings_high, findings_low
+                return findings_high, findings_low, damaged_pdf_choice
         elif suffix == '.docx':
             content = extract_docx_text(filepath)
             if not content:
-                return findings_high, findings_low
+                return findings_high, findings_low, damaged_pdf_choice
         elif suffix == '.xlsx':
             content = extract_xlsx_text(filepath)
             if not content:
-                return findings_high, findings_low
+                return findings_high, findings_low, damaged_pdf_choice
         elif suffix == '.eml':
             content = extract_eml_text(filepath)
             if not content:
-                return findings_high, findings_low
+                return findings_high, findings_low, damaged_pdf_choice
         else:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
@@ -339,34 +501,45 @@ def scan_file(filepath, filters):
     except Exception as e:
         print(f"[!] Error scanning {filepath}: {e}")
 
-    return findings_high, findings_low
+    return findings_high, findings_low, damaged_pdf_choice
 
-def scan_directory(target_path, filters):
+def scan_directory(target_path, filters, damaged_pdf_choice=None):
     """Recursively scan all files in a directory."""
     path = Path(target_path)
     file_results_high = {}
     file_results_low = {}
+    files_scanned = 0
 
     print(f"\n[*] Scanning: {path.resolve()}")
+    print("[*] Press Q at any time to cancel the scan.")
     print("-" * 60)
 
     for file_path in path.rglob('*'):
+        if check_for_cancel():
+            print()  # end the progress line before printing the cancel message
+            print("[!] Scan cancelled by user.")
+            break
+
         if any(excluded in str(file_path) for excluded in EXCLUDED_DIRS):
             continue
 
         if file_path.is_file() and file_path.suffix.lower() in SCAN_EXTENSIONS:
-            findings_high, findings_low = scan_file(file_path, filters)
+            findings_high, findings_low, damaged_pdf_choice = scan_file(file_path, filters, damaged_pdf_choice)
 
             if findings_high:
                 rel_path = str(file_path.relative_to(path))
                 file_results_high[rel_path] = findings_high
-                print(f"[!] Found PII in: {rel_path}")
-            
+
             if findings_low:
                 rel_path = str(file_path.relative_to(path))
                 file_results_low[rel_path] = findings_low
 
-    return file_results_high, file_results_low
+        files_scanned += 1
+        print(f"\r[*] Checked {files_scanned} files... (Q to cancel)   ", end='', flush=True)
+
+    print()
+
+    return file_results_high, file_results_low, damaged_pdf_choice
 
 def print_definite_report(file_results):
     """Print high-confidence findings."""
@@ -430,34 +603,45 @@ def print_possible_report(file_results):
 
 def main():
     print_banner()
-    
-    types_to_scan, filters = get_user_preferences()
-    target = get_target_path()
 
-    print("\n[*] Scanning... Please wait.\n")
+    types_to_scan = None
+    filters = None
 
-    if os.path.isfile(target):
-        file_results_high, file_results_low = {}, {}
-        findings_high, findings_low = scan_file(Path(target), filters)
-        if findings_high:
-            file_results_high[str(target)] = findings_high
-        if findings_low:
-            file_results_low[str(target)] = findings_low
-    else:
-        file_results_high, file_results_low = scan_directory(target, filters)
+    while True:
+        if types_to_scan is None:
+            types_to_scan, filters = get_user_preferences()
+        else:
+            if not ask_yes_no("\nKeep the same PII types and filters? (Y/N): "):
+                types_to_scan, filters = get_user_preferences()
 
-    # Print definite results first
-    has_pii = print_definite_report(file_results_high)
-    
-    # Optionally show low-confidence results
-    if file_results_low:
-        print("\n" + "-" * 60)
-        show_low = input("Found POSSIBLE/UNCONFIRMED results. Show them? (Y/N): ").strip().upper()
-        if show_low == 'Y':
-            print_possible_report(file_results_low)
+        target = get_target_path()
 
-    print("\n[*] Scan complete.")
-    print("=" * 60 + "\n")
+        print("\n[*] Scanning... Press Q to cancel.\n")
+
+        damaged_pdf_choice = None
+
+        if os.path.isfile(target):
+            file_results_high, file_results_low = {}, {}
+            findings_high, findings_low, damaged_pdf_choice = scan_file(Path(target), filters)
+            if findings_high:
+                file_results_high[str(target)] = findings_high
+            if findings_low:
+                file_results_low[str(target)] = findings_low
+        else:
+            file_results_high, file_results_low, damaged_pdf_choice = scan_directory(target, filters, damaged_pdf_choice=None)
+
+        print_definite_report(file_results_high)
+
+        if file_results_low:
+            if ask_yes_no("\nFound POSSIBLE/UNCONFIRMED results. Show them? (Y/N): "):
+                print_possible_report(file_results_low)
+
+        if not ask_yes_no("\nRun another scan? (Y/N): "):
+            break
+
+    print("\n[*] Thanks for using PII Scanner.")
+    print("=" * 60)
+    input("\nPress Enter to exit...")
 
 if __name__ == "__main__":
     main()
