@@ -130,11 +130,11 @@ For authorized security testing and educational purposes only. Never scan files 
 - v1.1.0 — Scan cancellation, damaged PDF consent flow, input validation, exit pause
 - v1.0.0 — Initial release
 
-## Code Signing Policy
+**Windows SmartScreen notice:** This executable is not code-signed.
+On first launch, Windows may show a "Windows protected your PC" message.
+Click **More info** → **Run anyway** to proceed.
 
-Free code signing provided by SignPath.io, certificate by SignPath Foundation.
-
-- **Committers and reviewers:** `cyber-quack`
-- **Approvers:** `cyber-quack`
-- **Privacy policy:** This tool performs all scanning locally. No data is transmitted to any server. No telemetry is collected.
-
+**Why it's unsigned:** Code signing certificates are expensive for individual
+developers. Since the source code is fully open, you can verify everything
+this program does by reading it — or run it from source with Python instead
+of using the executable.
