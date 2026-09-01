@@ -130,3 +130,11 @@ For authorized security testing and educational purposes only. Never scan files 
 - v1.1.0 — Scan cancellation, damaged PDF consent flow, input validation, exit pause
 - v1.0.0 — Initial release
 
+## Code Signing Policy
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
+- **Committers and reviewers:** `cyber-quack`
+- **Approvers:** `cyber-quack`
+- **Privacy policy:** This tool performs all scanning locally. No data is transmitted to any server. No telemetry is collected.
+
